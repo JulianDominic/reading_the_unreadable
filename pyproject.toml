@@ -12,6 +12,9 @@ license = {file = "LICENSE"}
 authors = [
     {name = "Jonathan Bourne"}
 ]
+dependencies = [
+    "bs4>=0.0.2",
+]
 
 [tool.setuptools]
 packages = ["function_modules"]

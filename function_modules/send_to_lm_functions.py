@@ -1367,20 +1367,24 @@ def decompose_filenames(df: pd.DataFrame) -> pd.DataFrame:
 
     # Extract position info more safely
     position_info = rest_parts[2]
-    block = position_info.str.extract(r"B(\d+)").astype(int)
-    column = position_info.str.extract(r"C(\d+)").astype(int)
-    reading_order = position_info.str.extract(r"R(\d+)").astype(int)
+    block = position_info.str.extract(r"B(\d+)", expand=False)
+    column = position_info.str.extract(r"C(\d+)", expand=False)
+    reading_order = position_info.str.extract(r"R(\d+)", expand=False)
 
-    # Create new columns without squeeze
+    # Extract segment number - handle the case where it might be in different positions
+    # Format is typically: page_id_class_B#C#R#_segment_#
+    segment = rest_parts[4] if 4 in rest_parts.columns else pd.Series([0] * len(df), index=df.index)
+
+    # Create new columns without squeeze, using fillna to handle any missing values
     new_cols = pd.DataFrame(
         {
             "issue_id": issue_id,
-            "page_number": rest_parts[0].astype(int),
+            "page_number": pd.to_numeric(rest_parts[0], errors='coerce').fillna(0).astype(int),
             "class": rest_parts[1],
-            "block": block.iloc[:, 0],  # Use iloc instead of squeeze
-            "column": column.iloc[:, 0],
-            "reading_order": reading_order.iloc[:, 0],
-            "segment": rest_parts[4].astype(int),
+            "block": pd.to_numeric(block, errors='coerce').fillna(0).astype(int),
+            "column": pd.to_numeric(column, errors='coerce').fillna(0).astype(int),
+            "reading_order": pd.to_numeric(reading_order, errors='coerce').fillna(0).astype(int),
+            "segment": pd.to_numeric(segment, errors='coerce').fillna(0).astype(int),
         },
         index=df.index,
     )
