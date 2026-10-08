@@ -177,9 +177,10 @@ def main():
 
     # Configure prompts
     prompt_dict = {
-        "text": "Transcribe the text from this newspaper image. Include linebreaks. Use plain text only, no markdown. Do not add commentary.",
-        "figure": "Describe the graphic from this newspaper image. Do not add commentary.",
-        "table": "Extract the table from this image as tab-separated values (TSV). Do not add commentary."
+        "text": "[data-bbox: page_id={page_id}, box_page_id={box_page_id}, x1={x1}, y1={y1}, x2={x2}, y2={y2}, class=text]\nTranscribe the text from this newspaper image. Include linebreaks. Use plain text only, no markdown. Do not add commentary.",
+        "title": "[data-bbox: page_id={page_id}, box_page_id={box_page_id}, x1={x1}, y1={y1}, x2={x2}, y2={y2}, class=title]\nTranscribe the title/headline from this newspaper image. Use plain text only, no markdown. Do not add commentary.",
+        "figure": "[data-bbox: page_id={page_id}, box_page_id={box_page_id}, x1={x1}, y1={y1}, x2={x2}, y2={y2}, class=figure]\nDescribe the graphic from this newspaper image. Do not add commentary.",
+        "table": "[data-bbox: page_id={page_id}, box_page_id={box_page_id}, x1={x1}, y1={y1}, x2={x2}, y2={y2}, class=table]\nExtract the table from this image as tab-separated values (TSV). Do not add commentary."
     }
 
     # Stage 3: Process with API
