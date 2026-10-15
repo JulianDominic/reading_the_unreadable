@@ -32,3 +32,6 @@ venv.bak/
 *.pptx
 
 /bbox_output
+
+# macOS
+.DS_Store
