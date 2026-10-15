@@ -1,0 +1,49 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Newspaper IIIF viewer</title>
+<script src="/mirador.min.js"></script>
+<style>body{margin:0}#viewer{position:absolute;inset:0}</style></head>
+<body><div id="viewer"></div>
+<script>
+// URL parameters:
+//   ?manifest=<page_id> or a full manifest URL. Default: every page in /collection.json, first one opened.
+//   ?layers=words (default), lines,words or blocks,lines,words
+const params = new URLSearchParams(location.search);
+const layers = (params.get("layers") || "words").split(",");
+
+// Drop the other annotation pages from the manifest before Mirador stores it.
+// The manifest on disk keeps all three layers; this only changes what the viewer loads.
+function keepLayers(url, action) {
+  if (!action || !action.manifestJson || !action.manifestJson.items) return action;
+  const manifestJson = {
+    ...action.manifestJson,
+    items: action.manifestJson.items.map((canvas) => ({
+      ...canvas,
+      annotations: (canvas.annotations || []).filter((page) =>
+        layers.some((layer) => page.id.endsWith(`/annotations/${layer}.json`))),
+    })),
+  };
+  return { ...action, manifestJson };
+}
+
+function manifestUrl(value) {
+  return /^https?:\/\//.test(value) ? value : new URL(`/${value}/manifest.json`, location.origin).href;
+}
+
+async function manifests() {
+  if (params.get("manifest")) return [manifestUrl(params.get("manifest"))];
+  const response = await fetch("/collection.json");
+  if (!response.ok) return [];
+  const collection = await response.json();
+  return (collection.items || []).filter((item) => item.type === "Manifest").map((item) => item.id);
+}
+
+manifests().then((ids) => {
+  Mirador.viewer({
+    id: "viewer",
+    requests: { postprocessors: [keepLayers] },
+    window: { sideBarOpenByDefault: true, defaultSideBarPanel: "annotations" },
+    catalog: ids.map((manifestId) => ({ manifestId })),
+    windows: ids.slice(0, 1).map((manifestId) => ({ manifestId })),
+  });
+});
+</script></body></html>

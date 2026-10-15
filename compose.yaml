@@ -1,0 +1,15 @@
+# View pipeline output in Mirador: docker compose up --build, then open http://localhost:8000
+services:
+  iiif-viewer:
+    build: docker/iiif-viewer
+    image: newspaper-iiif-viewer
+    ports:
+      - "8000:8000"  # manifests + Mirador (--manifest-base-url)
+      - "8182:8182"  # Cantaloupe (--image-base-url http://localhost:8182/iiif/3)
+    volumes:
+      - ./input_images:/images:ro      # the scans the pipeline read (--input)
+      - ./output/iiif:/srv/iiif:ro     # the pipeline output (--output)
+      - cantaloupe-cache:/var/cache/cantaloupe
+
+volumes:
+  cantaloupe-cache:
