@@ -10,6 +10,13 @@ function_modules/pipeline_stages.py
 function_modules/send_to_lm_functions.py
 function_modules/text_classification.py
 function_modules/util_funcs.py
+newspaper_pipeline/__init__.py
+newspaper_pipeline/config.py
+newspaper_pipeline/transforms.py
+newspaper_pipeline/schemas/iiif_3_0.json
+newspaper_pipeline/stages/__init__.py
+newspaper_pipeline/stages/convert.py
+newspaper_pipeline/stages/preprocess.py
 reading_the_unreadable.egg-info/PKG-INFO
 reading_the_unreadable.egg-info/SOURCES.txt
 reading_the_unreadable.egg-info/dependency_links.txt

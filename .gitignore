@@ -6,6 +6,7 @@ __pycache__/
 scrapbook.ipynb
 llvm.sh
 data/*
+output/
 archived/*
 # Jupyter Notebook
 .ipynb_checkpoints

@@ -7,7 +7,7 @@ name = "reading_the_unreadable"
 version = "0.1.0"
 description = "Tools for processing historical newspaper documents"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 license = {file = "LICENSE"}
 authors = [
     {name = "Jonathan Bourne"}
@@ -17,10 +17,11 @@ dependencies = [
 ]
 
 [tool.setuptools]
-packages = ["function_modules"]
+packages = ["function_modules", "newspaper_pipeline", "newspaper_pipeline.stages"]
 
 [tool.setuptools.package-data]
 function_modules = ["*.json", "*.yaml"]  # Include any data files your package needs
+newspaper_pipeline = ["schemas/*.json"]
 
 [options]
 package_dir = {""="."}
@@ -38,5 +39,33 @@ warn_unreachable = true
 
 [project.optional-dependencies]
 dev = [
-    "mypy>=1.0.0"
+    "mypy>=1.0.0",
+    "pytest>=9.1.1",
+]
+pipeline = [
+    "beautifulsoup4>=4.15.0",
+    "doclayout-yolo>=0.0.4",
+    "huggingface-hub>=2.2.0",
+    "jsonschema>=4.26.0",
+    "matplotlib>=3.11.2",
+    "numba>=0.68.0",
+    "numpy>=2.5.4",
+    "openai>=3.31.0",
+    "opencv-python>=5.0.0.93",
+    "pandas>=3.0.6",
+    "pillow>=12.3.0",
+    "pyarrow>=26.0.0",
+    "python-dotenv>=1.2.4",
+    "rapidfuzz>=3.14.6",
+    "tenacity>=9.2.1",
+    "tesserocr>=2.11.0",
+    "torch>=2.14.1",
+    "torchvision>=0.29.1",
+    "tqdm>=4.70.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: runs DocLayout-YOLO and Tesseract on the sample page (slow)",
 ]
