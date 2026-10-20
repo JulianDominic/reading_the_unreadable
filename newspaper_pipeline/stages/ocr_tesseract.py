@@ -32,7 +32,10 @@ def _get_api(tessdata: str, lang: str):
     return _API
 
 
-def tesseract_words(crop_path: str, tessdata: str, lang: str = "eng") -> List[Dict]:
+PSM_AUTO, PSM_SINGLE_BLOCK, PSM_SPARSE_TEXT = 3, 6, 11  # Tesseract page segmentation modes
+
+
+def tesseract_words(crop_path: str, tessdata: str, lang: str = "eng", scale: float = 1.0, psm: int = PSM_AUTO) -> List[Dict]:
     """
     Recognise a region crop and return its words with geometry.
 
@@ -40,6 +43,9 @@ def tesseract_words(crop_path: str, tessdata: str, lang: str = "eng") -> List[Di
         crop_path: Path to the region crop
         tessdata: Folder containing <lang>.traineddata
         lang: Tesseract language code
+        scale: Resize the crop by this factor first (display type in adverts is often too large
+            for Tesseract at full size); boxes are mapped back to full-size crop pixels
+        psm: Page segmentation mode; PSM_SPARSE_TEXT finds scattered display text in adverts
 
     Returns:
         Words in Tesseract reading order. Each word has text, conf, line (index unique
@@ -49,8 +55,10 @@ def tesseract_words(crop_path: str, tessdata: str, lang: str = "eng") -> List[Di
     from PIL import Image
 
     api = _get_api(tessdata, lang)
+    api.SetPageSegMode(psm)
     with Image.open(crop_path) as image:
-        api.SetImage(image)
+        size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+        api.SetImage(image if scale == 1.0 else image.resize(size, Image.Resampling.LANCZOS))
         api.Recognize()
 
     words: List[Dict] = []
@@ -74,7 +82,7 @@ def tesseract_words(crop_path: str, tessdata: str, lang: str = "eng") -> List[Di
         box = word.BoundingBox(level)
         if box is None:
             continue
-        x1, y1, x2, y2 = box
+        x1, y1, x2, y2 = (round(v / scale) for v in box)
         words.append(
             {
                 "text": text.strip(),

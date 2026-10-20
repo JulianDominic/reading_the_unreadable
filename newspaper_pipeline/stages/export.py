@@ -84,6 +84,7 @@ def write_flat_exports(page_dir: Path, page: Dict, regions: List[Dict]) -> None:
                 "h": box["h"],
                 "text": region.get("text", ""),
                 "html": region.get("html", ""),
+                "ocr_class": region.get("ocr_class", region["class"]),  # how chandra read it: figures as "text" by default
                 "chandra_labels": ",".join(region.get("labels", [])),
                 "image_descriptions": "\n".join(region.get("image_descriptions", [])),
                 "finish_reasons": ",".join(str(f) for f in region.get("finish_reasons", [])),

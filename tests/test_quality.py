@@ -47,7 +47,11 @@ def test_cut_off_column_at_the_page_edge_is_withheld():
     args = (60, 1700, 900.0, 20, 18, 0.5)  # 60 px wide with words about 30 px: two words wide
     assert assess_region("text", fragments, fragments, *args, at_page_edge=True) == "cut-off text at the page edge"
     assert assess_region("text", fragments, fragments, *args) is None  # the same text away from the edge is kept
-    assert assess_region("text", prose, prose, *args, at_page_edge=True) is None
+    # a real column of prose at the edge is at least a few words wide
+    assert assess_region("text", prose, prose, 400, 1700, 900.0, 20, 18, 0.5, at_page_edge=True) is None
+    # a strip under 2.5 word sizes wide is withheld whatever it holds (numbers have no letters to judge)
+    numbers = "0 1 16 11 1946 1946 1946 1946 4 5 6 7 8 9 10 11 12"
+    assert assess_region("text", numbers, numbers, 42, 633, 900.0, 17, 12, 0.0, at_page_edge=True) == "cut-off text at the page edge"
     # a real column at the edge of a full page is many words wide, even with an advert's short tokens
     advert = "J. E. PHILLIPS, 78 View St. W T F No. 1 Pass. Daily"
     assert assess_region("text", advert, advert, 700, 400, 900.0, 12, 12, 0.9, at_page_edge=True) is None

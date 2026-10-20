@@ -47,6 +47,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-deskew", action="store_true")
     parser.add_argument("--no-border-mask", action="store_true")
     parser.add_argument("--no-enhance", action="store_true")
+    parser.add_argument("--describe-figures", action="store_true",
+                        help="ask chandra to describe figure regions instead of transcribing their text")
     parser.add_argument("--keep-temp", action="store_true", help="keep per-page temporary files for debugging")
     parser.add_argument("--force", action="store_true", help="re-process pages that already finished")
     parser.add_argument("--limit", type=int, default=None, help="process at most N pages")
@@ -89,6 +91,7 @@ def main() -> int:
         deskew=not args.no_deskew,
         mask_borders=not args.no_border_mask,
         enhance=not args.no_enhance,
+        transcribe_figures=not args.describe_figures,
         keep_temp=args.keep_temp,
     )
     logger.info(f"chandra: {config.chandra_model} at {api_base} (max {config.chandra_concurrency} concurrent)")

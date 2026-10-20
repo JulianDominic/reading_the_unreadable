@@ -38,9 +38,10 @@ from newspaper_pipeline.stages.align import align_region
 from newspaper_pipeline.stages.convert import convert_page
 from newspaper_pipeline.stages.export import write_flat_exports, write_overlay
 from newspaper_pipeline.stages.ocr_chandra import ChandraPool
-from newspaper_pipeline.stages.ocr_tesseract import init_worker, tesseract_words
+from newspaper_pipeline.stages.ocr_tesseract import PSM_AUTO, PSM_SINGLE_BLOCK, PSM_SPARSE_TEXT, init_worker, tesseract_words
 from newspaper_pipeline.stages.preprocess import preprocess_page
 from newspaper_pipeline.stages.quality import assess_region, transcription_problem
+from newspaper_pipeline.stages.regions import figures_with_own_text
 from newspaper_pipeline.transforms import PageTransform
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,16 @@ class RunSummary:
     pages_failed: Dict[str, str] = field(default_factory=dict)
     seconds: float = 0.0
     chandra: Dict[str, int] = field(default_factory=dict)
+
+
+# Figure text needs this much Tesseract support (see quality.assess_region). Measured on the 25
+# figures the first version withheld: real advert text reached 0.25-1.00 with the readings below,
+# text chandra invented for pictures 0.00-0.03.
+FIGURE_MIN_ALIGNMENT = 0.2
+# Tesseract readings tried for figure text, cheapest first: display type is often too large, and
+# scattered words read better in sparse-text mode. Stops once the support is this good.
+FIGURE_READINGS = [(psm, scale) for psm in (PSM_AUTO, PSM_SPARSE_TEXT, PSM_SINGLE_BLOCK) for scale in (1.0, 0.75, 0.5, 0.35, 0.25, 0.15)][1:]
+FIGURE_GOOD_ENOUGH = 0.8
 
 
 def _token_share(regions: Iterable[Dict], with_estimated: bool = False) -> float:
@@ -129,9 +140,12 @@ class Pipeline:
                 self._detector = LayoutDetector(self.config)
         return self._detector.detect(page_id, processed_path)
 
-    async def _process_region(self, page: SourcePage, region: Dict) -> Dict:
+    async def _process_region(self, page: SourcePage, region: Dict, transcribe_figure: bool = False) -> Dict:
         loop = asyncio.get_running_loop()
-        region_class = region["class"]
+        # Figures are mostly advertisements set as pictures: read them like text when no other region
+        # already covers their text (see regions.figures_with_own_text). Any illustration chandra
+        # describes goes to image_descriptions, not the text.
+        region_class = "text" if region["class"] == "figure" and transcribe_figure else region["class"]
         priority = (page.seq, int(region["reading_order"]))
         chandra_task = asyncio.create_task(self.chandra.ocr_region(region["crop_path"], region_class, priority))
 
@@ -144,7 +158,7 @@ class Pipeline:
                 tesseract_error = f"tesseract: {exc}"
                 logger.warning(f"{page.page_id} {region['box_page_id']}: {tesseract_error}")
 
-        result: Dict[str, Any] = {"error": tesseract_error}
+        result: Dict[str, Any] = {"error": tesseract_error, "ocr_class": region_class}
         try:
             chandra = await chandra_task
         except Exception as exc:
@@ -166,8 +180,28 @@ class Pipeline:
                 break
 
         result.update(chandra, n_chandra_tokens=len(chandra["text"].split()), n_tesseract_words=len(words))
+        alignment = None
         if region_class != "figure" and words:
             alignment = await asyncio.to_thread(align_region, chandra["text"], words, crop_path=region["crop_path"])
+        if region["class"] == "figure" and region_class != "figure" and chandra["text"].strip():
+            # Display type in adverts (letters 100-200 px tall) and scattered words often defeat the
+            # default reading: try others and keep whichever agrees best with chandra
+            for psm, scale in FIGURE_READINGS:
+                if alignment is not None and alignment["score"] >= FIGURE_GOOD_ENOUGH:
+                    break
+                try:
+                    other = await loop.run_in_executor(
+                        self.tess_pool, tesseract_words, region["crop_path"], self.config.tessdata, self.config.tesseract_lang, scale, psm
+                    )
+                except Exception as exc:
+                    logger.warning(f"{page.page_id} {region['box_page_id']}: tesseract psm {psm} at {scale}x: {exc}")
+                    continue
+                if not other:
+                    continue
+                candidate = await asyncio.to_thread(align_region, chandra["text"], other, crop_path=region["crop_path"])
+                if alignment is None or candidate["score"] > alignment["score"]:
+                    alignment = candidate
+        if alignment is not None:
             result.update(
                 words=alignment["words"],
                 lines=alignment["lines"],
@@ -218,7 +252,7 @@ class Pipeline:
             if result.get("error"):
                 errors.append(f"{region['box_page_id']}: {result['error']}")
             reason = assess_region(
-                region["class"],
+                result.get("ocr_class", region["class"]),
                 result.get("text", ""),
                 result.get("html", ""),
                 region["x2"] - region["x1"],
@@ -231,6 +265,8 @@ class Pipeline:
                 # touching the left or right edge of the scan (original-scan coordinates: deskewing
                 # shifts a strip at x=0 several pixels inwards)
                 at_page_edge=entry["box"]["x"] <= 0.02 * converted["width"] or entry["box"]["x"] + entry["box"]["w"] >= 0.98 * converted["width"],
+                from_figure=region["class"] == "figure" and result.get("ocr_class") == "text",
+                figure_min_alignment=FIGURE_MIN_ALIGNMENT,
             )
             if reason:
                 # Keep the raw output for review in regions.parquet, but publish nothing from it
@@ -256,7 +292,7 @@ class Pipeline:
         write_flat_exports(out_dir, page_info, page_regions)
         write_overlay(str(page.source_path), (converted["width"], converted["height"]), page_regions, out_dir / "overlay.jpg", self.config.overlay_max_width)
 
-        published = [r for r in page_regions if not r.get("suspect") and r["class"] != "figure"]
+        published = [r for r in page_regions if not r.get("suspect") and r.get("ocr_class", r["class"]) != "figure"]
         report = {
             "page_id": page.page_id,
             "source": page.source_relpath,
@@ -324,7 +360,10 @@ class Pipeline:
                 logger.info(f"{page.page_id}: {len(regions)} regions, skew {prep['angle']:+.2f} deg; queued for OCR")
 
                 t = time.perf_counter()
-                results = await asyncio.gather(*(self._process_region(page, region) for region in regions.to_dict("records")))
+                own_text = figures_with_own_text(regions) if config.transcribe_figures else set()
+                results = await asyncio.gather(
+                    *(self._process_region(page, region, region["box_page_id"] in own_text) for region in regions.to_dict("records"))
+                )
                 lap("ocr_and_alignment", t)
 
                 t = time.perf_counter()

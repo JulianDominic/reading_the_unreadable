@@ -4,6 +4,8 @@
 // Matching is case- and accent-insensitive by default, runs across word boundaries ("the lost"),
 // never across text regions, and joins words hyphenated at a line end ("Aban- donment").
 // The current match's word is also selected in Mirador's annotation sidebar.
+// "All pages" searches every page in /collection.json the same way: Enter steps through the
+// matches of all pages (opening each page in the window), and a list shows the pages that match.
 const NewspaperFind = (() => {
   const HIGHLIGHT = { fill: "rgba(255, 214, 0, 0.55)", stroke: "rgba(200, 150, 0, 0.8)", width: 1 };
   const CURRENT = { fill: "rgba(255, 120, 0, 0.65)", stroke: "#d84315", width: 2 };
@@ -12,6 +14,7 @@ const NewspaperFind = (() => {
 
   const wordPages = new Map(); // canvas id -> URL or inline AnnotationPage with the word boxes
   const indexes = new Map(); // canvas id -> Promise of the search index for that canvas
+  const imageServices = new Map(); // canvas id -> IIIF image service of its image
 
   // ---- manifests --------------------------------------------------------------------------
 
@@ -22,6 +25,9 @@ const NewspaperFind = (() => {
     if (!Array.isArray(canvases)) return;
     for (const canvas of canvases) {
       if (canvas.type !== "Canvas") continue;
+      const body = (((canvas.items || [])[0] || {}).items || [])[0];
+      const service = body && body.body && [].concat(body.body.service || [])[0];
+      if (service) imageServices.set(canvas.id, service.id || service["@id"]);
       const pages = canvas.annotations || [];
       const page = pages.find((p) => /\/words\.json$/.test(p.id)) || pages.find((p) => /\/lines\.json$/.test(p.id));
       if (!page) continue;
@@ -221,14 +227,18 @@ const NewspaperFind = (() => {
     <span class="find-count" aria-live="polite"></span>
     <button type="button" class="find-toggle" data-option="matchCase" title="Match case" aria-pressed="false">Aa</button>
     <button type="button" class="find-toggle" data-option="wholeWord" title="Whole words only" aria-pressed="false"><u>ab</u></button>
+    <button type="button" class="find-toggle find-scope" data-option="allPages" title="Search all pages" aria-pressed="false">All pages</button>
     <span class="find-divider"></span>
     <button type="button" data-step="-1" title="Previous match (Shift+Enter)" aria-label="Previous match">&#x2303;</button>
     <button type="button" data-step="1" title="Next match (Enter)" aria-label="Next match">&#x2304;</button>
     <button type="button" class="find-close" title="Close (Esc)" aria-label="Close find bar">&#x2715;</button>`;
   const input = bar.querySelector("input");
   const count = bar.querySelector(".find-count");
+  const results = document.createElement("div"); // the pages that match, in "All pages" mode
+  results.className = "find-results";
+  results.hidden = true;
 
-  const options = { matchCase: false, wholeWord: false };
+  const options = { matchCase: false, wholeWord: false, allPages: false };
   let hits = [];
   let current = -1;
   let layer = null; // the canvas the highlights are drawn on, see createLayer()
@@ -309,27 +319,50 @@ const NewspaperFind = (() => {
     layer.redraw();
   }
 
-  // A new viewer is reset to the whole page a few times while it opens (OpenSeadragon's goHome,
-  // Mirador's fit once the first tile arrives), which would undo a jump. Returns true when the
-  // viewer is past that; otherwise calls back once its image has fully loaded for the first time.
-  const settled = new WeakSet();
-  function whenSettled(viewer, callback) {
-    if (settled.has(viewer)) return true;
-    const item = viewer.world.getItemAt(0);
+  // A new image is reset to the whole page a few times while it opens (OpenSeadragon's goHome,
+  // Mirador's fit once the first tile arrives), which would undo a jump. Mirador keeps the same
+  // viewer when a window switches pages, so this is tracked per image: returns true when the
+  // canvas's image is past that, otherwise calls back once it has fully loaded for the first time.
+  const settled = new WeakSet(); // tiled images
+  const waiting = new WeakMap(); // viewer -> canvas id it is waiting for
+
+  function imageFor(viewer, canvasId) {
+    const want = imageServices.get(canvasId);
+    const norm = (id) => String(id || "").replace(/\/info\.json$/, "").replace(/\/$/, "");
+    for (let i = 0; i < viewer.world.getItemCount(); i++) {
+      const item = viewer.world.getItemAt(i);
+      if (!want || norm(item.source && (item.source.id || item.source["@id"])) === norm(want)) return item;
+    }
+    return null;
+  }
+
+  function whenSettled(viewer, canvasId, callback) {
+    const item = imageFor(viewer, canvasId);
+    if (item && settled.has(item)) return true;
     if (item && item.getFullyLoaded()) {
-      settled.add(viewer);
+      settled.add(item);
       return true;
     }
-    if (viewer.findWaiting) return false;
-    viewer.findWaiting = true;
+    if (waiting.get(viewer) === canvasId) return false;
+    waiting.set(viewer, canvasId);
     const waitFor = (image) => image.addHandler("fully-loaded-change", function loaded(event) {
       if (!event.fullyLoaded) return;
       image.removeHandler("fully-loaded-change", loaded);
-      settled.add(viewer);
-      viewer.findWaiting = false;
+      settled.add(image);
+      if (waiting.get(viewer) === canvasId) waiting.delete(viewer);
       setTimeout(callback);
     });
-    if (item) waitFor(item); else viewer.world.addOnceHandler("add-item", (event) => waitFor(event.item));
+    if (item) {
+      waitFor(item);
+    } else {
+      // The page's image isn't in the viewer yet (or the previous page's still is)
+      viewer.world.addHandler("add-item", function added() {
+        const image = imageFor(viewer, canvasId);
+        if (!image) return;
+        viewer.world.removeHandler("add-item", added);
+        waitFor(image);
+      });
+    }
     return false;
   }
 
@@ -338,7 +371,7 @@ const NewspaperFind = (() => {
   function reveal(t) {
     const hit = hits[current];
     if (!hit || !t.viewer) return;
-    const settledNow = whenSettled(t.viewer, () => {
+    const settledNow = whenSettled(t.viewer, hit.canvasId, () => {
       const now = target();
       if (now && now.viewer === t.viewer && hits.length) reveal(now);
     });
@@ -412,8 +445,10 @@ const NewspaperFind = (() => {
   }
 
   function updateCount(status) {
-    count.textContent = status !== undefined ? status : hits.length ? `${current + 1} of ${hits.length}` : "No results";
-    bar.classList.toggle("find-none", input.value.trim() !== "" && hits.length === 0 && status === undefined);
+    const total = options.allPages ? all.length : hits.length;
+    const position = options.allPages ? allCurrent : current;
+    count.textContent = status !== undefined ? status : total ? `${position + 1} of ${total}` : "No results";
+    bar.classList.toggle("find-none", input.value.trim() !== "" && total === 0 && status === undefined);
   }
 
   // The match to start on: keep the reading position while the query is being typed,
@@ -437,6 +472,8 @@ const NewspaperFind = (() => {
   }
 
   async function search({ keepPosition = true } = {}) {
+    if (options.allPages) return searchAll({ keepPosition });
+    results.hidden = true;
     const seq = ++searchSeq;
     const query = input.value.trim().replace(/\s+/g, " ");
     const t = store && target();
@@ -469,8 +506,186 @@ const NewspaperFind = (() => {
     selectCurrent(t);
   }
 
+  // ---- all pages ----------------------------------------------------------------------------
+
+  let collectionSource = "/collection.json";
+  let collection = null; // Promise of [{ manifestId, label }]
+  const manifests = new Map(); // manifest id -> Promise of its canvas ids
+  let all = []; // every match in the collection: { manifestId, canvasId, word, page }
+  let allCurrent = -1;
+  let pending = null; // index into all, waiting for the window to open its page
+
+  function label(value) {
+    if (!value) return "";
+    if (typeof value === "string") return value;
+    const values = Object.values(value)[0];
+    return Array.isArray(values) ? values.join(" ") : String(values || "");
+  }
+
+  function loadCollection() {
+    if (!collection) {
+      collection = fetch(collectionSource)
+        .then((r) => (r.ok ? r.json() : { items: [] }))
+        .then((c) => (c.items || []).filter((i) => i.type === "Manifest").map((i) => ({ manifestId: i.id, label: label(i.label) || i.id })))
+        .catch(() => []);
+    }
+    return collection;
+  }
+
+  // A manifest's canvases, recording where their words are (as for the manifests Mirador loads)
+  function loadManifest(manifestId) {
+    if (!manifests.has(manifestId)) {
+      manifests.set(manifestId, fetch(manifestId)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((json) => {
+          if (!json) return [];
+          if (!(json.items || []).some((c) => wordPages.has(c.id))) recordManifest({ manifestJson: json });
+          return (json.items || []).filter((c) => c.type === "Canvas").map((c) => c.id);
+        })
+        .catch(() => []));
+    }
+    return manifests.get(manifestId);
+  }
+
+  // Run fn over items, a few at a time
+  async function eachLimited(items, limit, fn) {
+    let next = 0;
+    const worker = async () => {
+      while (next < items.length) {
+        const i = next++;
+        await fn(items[i], i);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  }
+
+  async function searchAll({ keepPosition = true } = {}) {
+    const seq = ++searchSeq;
+    const query = input.value.trim().replace(/\s+/g, " ");
+    const previous = keepPosition ? all[allCurrent] : null;
+    pending = null;
+    if (!query || !store) {
+      all = [];
+      allCurrent = -1;
+      hits = [];
+      current = -1;
+      shownKey = "";
+      clearHighlights();
+      results.hidden = true;
+      updateCount("");
+      return;
+    }
+    const pages = await loadCollection();
+    let done = 0;
+    const found = new Array(pages.length);
+    await eachLimited(pages, 4, async (page, i) => {
+      const canvasIds = await loadManifest(page.manifestId);
+      const perPage = [];
+      for (const canvasId of canvasIds) {
+        const index = await loadIndex(canvasId);
+        if (!index) continue;
+        for (const hit of findInIndex(index, query, options)) {
+          const around = index.words.slice(Math.max(0, hit.word - 6), hit.word + 8).map((w) => w.text).join(" ");
+          perPage.push({ manifestId: page.manifestId, canvasId, word: hit.word, page: i, snippet: around });
+        }
+      }
+      found[i] = perPage;
+      done++;
+      if (seq === searchSeq && done < pages.length) updateCount(`Searching ${done} of ${pages.length} pages`);
+    });
+    if (seq !== searchSeq) return; // a newer search started meanwhile
+    all = found.flat();
+    renderResults(pages);
+    if (!all.length) {
+      allCurrent = -1;
+      hits = [];
+      current = -1;
+      clearHighlights();
+      updateCount();
+      return;
+    }
+    // Keep the reading position while typing; otherwise start on the page that is open
+    const t = target();
+    let start = -1;
+    if (previous) start = all.findIndex((g) => g.page > previous.page || (g.page === previous.page && g.word >= previous.word));
+    if (start === -1 && t) start = all.findIndex((g) => t.canvasIds.includes(g.canvasId));
+    showGlobal(start === -1 ? 0 : start);
+  }
+
+  function renderResults(pages) {
+    const byPage = new Map();
+    all.forEach((g, i) => {
+      if (!byPage.has(g.page)) byPage.set(g.page, { first: i, n: 0, snippet: g.snippet });
+      byPage.get(g.page).n++;
+    });
+    results.replaceChildren();
+    const head = document.createElement("div");
+    head.className = "find-results-head";
+    head.textContent = all.length ? `${all.length} matches on ${byPage.size} of ${pages.length} pages` : `No matches on ${pages.length} pages`;
+    results.append(head);
+    for (const [page, info] of byPage) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "find-result";
+      row.dataset.first = info.first;
+      row.dataset.page = page;
+      const title = document.createElement("strong");
+      title.textContent = `${pages[page].label}  ·  ${info.n}`;
+      const snippet = document.createElement("span");
+      snippet.textContent = info.snippet;
+      row.append(title, snippet);
+      results.append(row);
+    }
+    results.hidden = false;
+  }
+
+  // Show match i of the collection: open its page if needed, then highlight it like a page search
+  async function showGlobal(i) {
+    const g = all[i];
+    const t = store && target();
+    if (!g || !t) return;
+    allCurrent = i;
+    for (const row of results.querySelectorAll(".find-result")) row.classList.toggle("find-result-current", Number(row.dataset.page) === g.page);
+    if (!t.canvasIds.includes(g.canvasId)) {
+      pending = i;
+      shownKey = "";
+      clearHighlights();
+      updateCount("Opening page");
+      store.dispatch(Mirador.updateWindow(t.windowId, { manifestId: g.manifestId, canvasId: g.canvasId }));
+      return;
+    }
+    const query = input.value.trim().replace(/\s+/g, " ");
+    const loaded = await Promise.all(t.canvasIds.map(loadIndex));
+    if (allCurrent !== i) return;
+    hits = loaded.filter(Boolean).flatMap((index) => findInIndex(index, query, options));
+    current = hits.findIndex((h) => h.canvasId === g.canvasId && h.word === g.word);
+    shownKey = targetKey(t);
+    drawHighlights(t);
+    updateCount();
+    reveal(t);
+    selectCurrent(t);
+  }
+
+  // The user opened another page themselves: carry on from its first match, if it has one
+  function followNavigation(t) {
+    shownKey = targetKey(t);
+    const i = t ? all.findIndex((g) => t.canvasIds.includes(g.canvasId)) : -1;
+    if (i !== -1) {
+      showGlobal(i);
+    } else {
+      hits = [];
+      current = -1;
+      clearHighlights();
+      updateCount("No matches on this page");
+    }
+  }
+
   function step(direction) {
     if (bar.hidden) open();
+    if (options.allPages) {
+      if (all.length) showGlobal((allCurrent + direction + all.length) % all.length);
+      return;
+    }
     if (hits.length === 0) return;
     current = (current + direction + hits.length) % hits.length;
     const t = target();
@@ -489,6 +704,8 @@ const NewspaperFind = (() => {
 
   function close() {
     bar.hidden = true;
+    results.hidden = true;
+    pending = null;
     searchSeq++;
     clearHighlights();
     hits = [];
@@ -521,10 +738,17 @@ const NewspaperFind = (() => {
       const option = button.dataset.option;
       options[option] = !options[option];
       button.setAttribute("aria-pressed", String(options[option]));
+      if (option === "allPages") input.placeholder = options.allPages ? "Find in all pages" : "Find on page";
       input.focus();
       search({ keepPosition: false });
     }
   });
+  results.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-first]");
+    if (row) showGlobal(Number(row.dataset.first));
+  });
+  results.addEventListener("mousedown", (event) => event.preventDefault());
+
   // Clicks on the bar shouldn't reach Mirador (it would take focus from the input)
   bar.addEventListener("mousedown", (event) => { if (event.target !== input) event.preventDefault(); });
 
@@ -546,16 +770,40 @@ const NewspaperFind = (() => {
 
   // Mirador's fullscreen mode only shows its own element; keep the bar inside it
   document.addEventListener("fullscreenchange", () => {
-    (document.fullscreenElement || document.body).appendChild(bar);
+    (document.fullscreenElement || document.body).append(bar, results);
   });
 
   // ---- wiring -----------------------------------------------------------------------------
 
-  // Re-run the search when the user changes page, window or view type
+  // Redux calls subscribers inside dispatch. Reacting there (our own dispatches included) in the
+  // middle of Mirador's saga chain for a page switch made redux-saga miss the action that requests
+  // the new page's image, which then never appeared. So react on the next tick, once per burst.
+  let storeChangeQueued = false;
   function onStoreChange() {
+    if (storeChangeQueued) return;
+    storeChangeQueued = true;
+    setTimeout(() => {
+      storeChangeQueued = false;
+      handleStoreChange();
+    }, 0);
+  }
+
+  // Re-run the search when the user changes page, window or view type
+  function handleStoreChange() {
     if (bar.hidden || !input.value.trim()) return;
     const t = target();
-    if (targetKey(t) !== shownKey) {
+    if (options.allPages && targetKey(t) !== shownKey) {
+      if (pending !== null) {
+        // Waiting for the window to show the page of the next match
+        if (t && all[pending] && t.canvasIds.includes(all[pending].canvasId)) {
+          const i = pending;
+          pending = null;
+          showGlobal(i);
+        }
+      } else {
+        followNavigation(t);
+      }
+    } else if (targetKey(t) !== shownKey) {
       search({ keepPosition: false });
     } else if (hits.length && t.viewer && (!layer || layer.viewer !== t.viewer)) {
       // The viewer wasn't ready when the search ran, or Mirador replaced it
@@ -567,9 +815,10 @@ const NewspaperFind = (() => {
     }
   }
 
-  function attach(miradorStore) {
+  function attach(miradorStore, { collectionUrl = "/collection.json" } = {}) {
     store = miradorStore;
-    document.body.appendChild(bar);
+    collectionSource = collectionUrl;
+    document.body.append(bar, results);
     store.subscribe(onStoreChange);
   }
 

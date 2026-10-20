@@ -8,7 +8,8 @@ AES-encrypted, so use 7-Zip or pyzipper), run the pipeline on some of its images
     python run_pipeline.py --input data/BLN600/Images --output output/bln600
     python evaluate_transcription.py output/bln600
 
-Each page's text is its published regions (not figures, not withheld ones) in reading order.
+Each page's text is its published regions in reading order: not withheld ones, and figures
+only when they were transcribed rather than described.
 Both sides are normalised the same way: Unicode NFKC, long s and curly quotes folded, words
 hyphenated at a line end joined, whitespace collapsed. --dashes also ignores how dashes are
 spaced or doubled ("GAME. -Lawn" vs "GAME.--Lawn"), a typesetting convention rather than a
@@ -36,7 +37,9 @@ def normalise(text: str, dashes: bool = False) -> str:
 
 def published_text(page_dir: Path) -> str:
     regions = pd.read_parquet(page_dir / "regions.parquet").sort_values("reading_order")
-    keep = regions[(regions["class"] != "figure") & (regions["suspect"].fillna("") == "") & regions["text"].fillna("").ne("")]
+    # Figures count when they were transcribed (ocr_class "text"), not when they were described
+    read_as = regions["ocr_class"] if "ocr_class" in regions else regions["class"]
+    keep = regions[(read_as != "figure") & (regions["suspect"].fillna("") == "") & regions["text"].fillna("").ne("")]
     return "\n".join(keep["text"])
 
 

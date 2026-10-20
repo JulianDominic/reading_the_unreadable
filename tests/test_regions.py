@@ -145,3 +145,25 @@ def test_recovered_boxes_give_way_to_detections():
     a, b = split_overlaps([detected, recovered], ink)
     assert a["bbox"] == (300, 100, 1200, 700)  # the detection keeps its first letters
     assert b["bbox"][2] == 300
+
+
+def test_only_figures_with_their_own_text_are_transcribed():
+    import pandas as pd
+
+    from newspaper_pipeline.stages.regions import figures_with_own_text
+
+    def region(bpid, cls, order, x1, y1, x2, y2):
+        return {"box_page_id": bpid, "class": cls, "reading_order": order, "x1": x1, "y1": y1, "x2": x2, "y2": y2}
+
+    regions = pd.DataFrame(
+        [
+            region("lone", "figure", 1, 0, 0, 100, 100),  # an advert nothing else covers
+            region("dup_text", "text", 2, 200, 0, 300, 100),
+            region("dup_fig", "figure", 3, 200, 0, 300, 100),  # same box as a text region
+            region("ad", "figure", 4, 0, 200, 300, 400),
+            region("heading", "title", 5, 20, 210, 280, 250),  # detected inside the advert
+            region("table_a", "figure", 6, 400, 0, 500, 100),
+            region("table_b", "figure", 7, 402, 2, 498, 98),  # the same table detected twice
+        ]
+    )
+    assert figures_with_own_text(regions) == {"lone", "table_a"}

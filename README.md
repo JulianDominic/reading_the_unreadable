@@ -1,6 +1,8 @@
 # Reading the Unreadable
 
-OCR pipeline for historical newspaper images using vision-language models.
+OCR pipeline for historical newspaper images using vision-language models. Scans go in;
+IIIF manifests come out with the text of every page and the position of every word on the
+original scan, viewable and searchable in a browser.
 
 ## Setup
 
@@ -45,8 +47,14 @@ python run_pipeline.py --help           # all options
   ink in the crop (`match` = `estimated` in `words.parquet`, tagged "estimated position" in the
   IIIF word annotations). In hold-out tests 98.2–99.3% of estimates overlap the real box
   (IoU ≥ 0.5); see [Accuracy](#accuracy). A word is skipped when the evidence doesn't fit.
+- Figure regions (mostly adverts set as pictures) are transcribed like text when no other
+  region already covers their text. Their text is only published when Tesseract finds enough of
+  the same words (trying smaller sizes and sparse-text mode for display type), because asked to
+  transcribe a picture with no text, chandra invents some. `--describe-figures` describes them
+  instead.
 - Output that isn't a transcription (repetition loops, model commentary, layout JSON) is sent
-  to chandra again, up to twice, in smaller segments with a little sampling temperature. What
+  to chandra again, up to twice, in smaller segments with a little sampling temperature and a
+  doubled token cap (dense tables can need more than the first cap). What
   still fails, plus far too many words and cut-off text from a neighbouring column or page at
   the scan's edge, is flagged in `regions.parquet` and left out of the IIIF annotations.
 - Re-runs skip finished pages (`_SUCCESS` marker) and reuse cached chandra answers.
@@ -57,7 +65,7 @@ Output per page in `output/iiif/<page_id>/`:
 |---|---|
 | `manifest.json` | One canvas in original-scan coordinates, served by Cantaloupe |
 | `annotations/{blocks,lines,words}.json` | `supplementing` annotations with `textGranularity` |
-| `{regions,lines,words}.parquet` | Flat exports |
+| `{regions,lines,words}.parquet` | Flat exports (`regions.ocr_class` says whether a figure was transcribed or described) |
 | `page.txt` | Text in reading order |
 | `overlay.jpg` | Boxes drawn on the scan, for checking |
 | `report.json` | Scores, estimated word count, timings, flagged regions |
@@ -68,8 +76,8 @@ Measured on 2026-10-19.
 
 | What | Result | How |
 |---|---|---|
-| Characters | **99.0%** (CER 1.00%) | 150 held-out BLN600 excerpts, strict; 99.1% ignoring dash spacing. Gale's commercial OCR: 93.6% |
-| Words | 96.7% | Same pages, strict; 97.7% ignoring dash spacing, 98.6% ignoring punctuation |
+| Characters | **99.0%** (CER 0.98%) | 150 held-out BLN600 excerpts, strict; 99.1% ignoring dash spacing. Gale's commercial OCR: 93.6% |
+| Words | 96.8% | Same pages, strict; 97.8% ignoring dash spacing, 98.6% ignoring punctuation |
 | Word boxes | **99.6%** (896 of 900) | Random words from both sets, checked by eye: box on the right word, IoU ≥ 0.5 |
 | Estimated boxes | 98.2–99.3% | Hold-out: matched words hidden and re-placed (about 2.5% of words are estimated) |
 
@@ -100,14 +108,20 @@ docker compose down
   line or block if words are hidden). Enter / Shift+Enter step through matches, Esc closes the
   bar. Matching ignores case and accents (toggles for match case and whole words), works on
   phrases, and joins words hyphenated at a line end (both parts are highlighted).
+- "All pages" in the find bar searches every page in `collection.json`. The count covers all
+  pages, Enter / Shift+Enter open each page in turn, and a list shows the pages that match with
+  a snippet; click one to jump there.
 - Estimated word boxes show an "estimated position" tag in the sidebar.
-- `docker/iiif-viewer/mirador-fixes.js` patches a Mirador 4.3.0 bug (unbalanced canvas
-  `save()` for hidden annotations) that made panning slower the longer the viewer was open.
+- `docker/iiif-viewer/mirador-fixes.js` patches Mirador 4.3.0: an unbalanced canvas `save()` for
+  hidden annotations that made panning slower the longer the viewer was open, and releasing a
+  drag over a word selecting it (which also stalled the viewer while the sidebar re-rendered).
   Recheck it when upgrading Mirador.
 - `compose.yaml` mounts `./input_images` and `./output/iiif`; edit those paths if your files
   are elsewhere.
 - On your own servers, point Cantaloupe at the scan folder and serve the output folder with
-  CORS. Then pass `--image-base-url` and `--manifest-base-url` to the pipeline.
+  CORS. Then pass `--image-base-url` and `--manifest-base-url` to the pipeline. The image
+  server must send CORS headers too: the viewer requests tiles with CORS, and without them a
+  page stays blank after switching pages.
 - Tiled pyramidal TIFF/JP2 makes Cantaloupe much faster, e.g.
   `vips tiffsave in.tif out.tif --tile --pyramid --compression jpeg`.
 

@@ -76,6 +76,8 @@ def assess_region(
     alignment_score: float,
     finish_reasons: Sequence[str] = (),
     at_page_edge: bool = False,
+    from_figure: bool = False,
+    figure_min_alignment: float = 0.2,
 ) -> Optional[str]:
     """
     Decide whether a region's chandra output looks like something other than a transcription.
@@ -89,6 +91,10 @@ def assess_region(
         n_chandra_tokens, n_tesseract_words, alignment_score: From the alignment stage
         finish_reasons: Per-request finish reasons; "length" means the output hit its token cap
         at_page_edge: The region touches the left or right edge of the scan
+        from_figure: A figure region read as text. Asked to transcribe a picture with no text,
+            chandra invents some ("THE NEW YORK TIMES, FRIDAY, MAY 15, 1931"), so figure text is
+            only published when Tesseract independently found the same words
+        figure_min_alignment: How much of a figure's text Tesseract must confirm
 
     Returns:
         Reason string when suspect, otherwise None
@@ -97,9 +103,14 @@ def assess_region(
     if problem or region_class == "figure" or not text.strip():
         return problem
     # A strip of cut-off text is a few letters wide. Calibrated on the edge regions of 250 BLN600
-    # excerpts and 9 full pages: under 6 word sizes wide and 60% fragments caught 35 of 53 strips
-    # and none of 893 real regions (real text at an edge is at least 2.9 word sizes wide)
-    if at_page_edge and width < 6.0 * max(word_area, 1.0) ** 0.5 and fragment_share(text) >= 0.6:
+    # excerpts and 9 full pages: real text at an edge is at least 2.9 word sizes wide, and under 6
+    # word sizes with 60% fragments caught 35 of 53 strips and none of 893 real regions
+    if from_figure and alignment_score < figure_min_alignment:
+        return "figure text not confirmed by Tesseract"
+    word_size = max(word_area, 1.0) ** 0.5
+    if at_page_edge and width < 2.5 * word_size:
+        return "cut-off text at the page edge"  # too narrow for a column, whatever was read in it
+    if at_page_edge and width < 6.0 * word_size and fragment_share(text) >= 0.6:
         return "cut-off text at the page edge"
     capacity = (width * height) / max(word_area, 1.0)
     if n_chandra_tokens > max(20.0, 3.0 * capacity):

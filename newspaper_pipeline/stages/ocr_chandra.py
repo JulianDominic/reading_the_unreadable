@@ -330,7 +330,9 @@ class ChandraPool:
             priority: Queue priority, lower runs first
             attempt: 0 for the first try. A retry (after output that wasn't a transcription) uses
                 segments half as tall per attempt and a little sampling temperature, which breaks
-                the repetition loops greedy decoding can fall into
+                the repetition loops greedy decoding can fall into, and doubles the token cap per
+                attempt: dense text such as number tables can need more than the cap estimated
+                from the area, and being cut off there looks like a loop
 
         Returns:
             Dict with text, html, labels, image_descriptions, finish_reasons, prompt/completion tokens,
@@ -349,7 +351,7 @@ class ChandraPool:
                 offsets = split_offsets(height, width, self.config.split_max_ratio / 2**attempt, self.config.split_overlap_fraction)
             segments, caps = [], []
             for y1, y2 in offsets:
-                caps.append(self.token_cap(region_class, width, y2 - y1))
+                caps.append(min(self.config.chandra_max_tokens, self.token_cap(region_class, width, y2 - y1) * 2**attempt))
                 buffer = io.BytesIO()
                 pad_to_aspect(image.crop((0, y1, width, y2)), self.config.max_aspect_ratio).save(buffer, format="PNG")
                 segments.append(buffer.getvalue())

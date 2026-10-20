@@ -23,7 +23,7 @@ never get word annotations, so they cannot duplicate text.
 """
 
 import logging
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import cv2
 import numpy as np
@@ -410,3 +410,45 @@ def build_regions(detections: pd.DataFrame, gray: np.ndarray, recover_missed: bo
             }
         )
     return pd.DataFrame(rows)
+
+
+def figures_with_own_text(regions: pd.DataFrame, share: float = 0.8) -> Set[str]:
+    """
+    Figure regions whose text no other region covers, so they can be transcribed without
+    reading anything twice.
+
+    A figure is left out when another region covers most of it (a duplicate detection), when it
+    contains most of a text-like region (an advert whose headings were also detected as titles
+    and text), or when an earlier figure covers most of it.
+
+    Args:
+        regions: build_regions output (box_page_id, class, reading_order, x1..y2)
+        share: Fraction of a box's area that counts as "most of it"
+
+    Returns:
+        box_page_id of the figures to transcribe
+    """
+    boxes = regions.sort_values("reading_order").to_dict("records")
+    own: Set[str] = set()
+    for i, fig in enumerate(boxes):
+        if fig["class"] != "figure":
+            continue
+        fbox = (fig["x1"], fig["y1"], fig["x2"], fig["y2"])
+        clash = False
+        for j, other in enumerate(boxes):
+            if j == i:
+                continue
+            obox = (other["x1"], other["y1"], other["x2"], other["y2"])
+            overlap = _area(_intersection(fbox, obox))
+            if overlap <= 0:
+                continue
+            covered = overlap >= share * _area(fbox)
+            if other["class"] != "figure" and (covered or overlap >= share * _area(obox)):
+                clash = True
+            elif other["class"] == "figure" and j < i and covered:
+                clash = True
+            if clash:
+                break
+        if not clash:
+            own.add(fig["box_page_id"])
+    return own
