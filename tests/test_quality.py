@@ -37,3 +37,31 @@ def test_hitting_the_token_limit_is_flagged():
     reason = assess_region("figure", "", '[{"x": 10, "y": 10}, {"x": 10, "y": 10}', 456, 162, 3500.0, 0, 0, 0.0, ["length"])
     assert reason == "output hit its token limit (repetition loop)"
     assert assess_region("text", "fine text here", "fine text here", 900, 300, 3500.0, 3, 3, 1.0, ["stop"]) is None
+
+
+def test_cut_off_column_at_the_page_edge_is_withheld():
+    from newspaper_pipeline.stages.quality import assess_region
+
+    fragments = "to e, in le een, ed all he he ce ed he vn an vn on be he he in- no"
+    prose = "Frederick Percy Sadler, a fish salesman, employed at Billingsgate, and living at Forest Glen"
+    args = (60, 1700, 900.0, 20, 18, 0.5)  # 60 px wide with words about 30 px: two words wide
+    assert assess_region("text", fragments, fragments, *args, at_page_edge=True) == "cut-off text at the page edge"
+    assert assess_region("text", fragments, fragments, *args) is None  # the same text away from the edge is kept
+    assert assess_region("text", prose, prose, *args, at_page_edge=True) is None
+    # a real column at the edge of a full page is many words wide, even with an advert's short tokens
+    advert = "J. E. PHILLIPS, 78 View St. W T F No. 1 Pass. Daily"
+    assert assess_region("text", advert, advert, 700, 400, 900.0, 12, 12, 0.9, at_page_edge=True) is None
+
+
+def test_victorian_prose_is_not_mistaken_for_model_commentary():
+    from newspaper_pipeline.stages.quality import transcription_problem
+
+    for prose in (
+        "The Coroner: What is the cause of death?—Dr. Matcham: Starvation. I cannot conceive there is any foundation.",
+        "The complainant, who is twenty-five years of age, appears to be of German extraction.",
+        "The movements of the British North Pacific squadron appears to be rather uncertain.",
+    ):
+        assert transcription_problem("text", prose, prose) is None
+    description = "Royal coat of arms of the United Kingdom, with a lion and a unicorn.\nThe image shows the arms."
+    assert transcription_problem("title", description, description) == "model commentary instead of a transcription"
+    assert transcription_problem("text", "I cannot read this text, it is heavily cropped.", "") is not None

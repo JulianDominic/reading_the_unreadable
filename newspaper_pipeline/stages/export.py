@@ -94,6 +94,7 @@ def write_flat_exports(page_dir: Path, page: Dict, regions: List[Dict]) -> None:
                 "n_chandra_tokens": region.get("n_chandra_tokens", 0),
                 "n_tesseract_words": region.get("n_tesseract_words", 0),
                 "n_matched": region.get("n_matched", 0),
+                "n_estimated": region.get("n_estimated", 0),
                 "error": region.get("error", ""),
                 "suspect": region.get("suspect", ""),
             }
@@ -113,6 +114,8 @@ def write_flat_exports(page_dir: Path, page: Dict, regions: List[Dict]) -> None:
                     "similarity": word["similarity"],
                     "match": word["match"],
                     **word["box"],
+                    # continuation on the next line of a word hyphenated across lines
+                    **{f"cont_{k}": (word["part_boxes"][1][k] if word.get("part_boxes") else None) for k in ("x", "y", "w", "h")},
                 }
             )
 
@@ -120,5 +123,8 @@ def write_flat_exports(page_dir: Path, page: Dict, regions: List[Dict]) -> None:
     pd.DataFrame(line_rows, columns=["page_id", "box_page_id", "line", "text", "x", "y", "w", "h"]).to_parquet(page_dir / "lines.parquet", index=False)
     pd.DataFrame(
         word_rows,
-        columns=["page_id", "box_page_id", "word", "line", "text", "tesseract_text", "tesseract_conf", "similarity", "match", "x", "y", "w", "h"],
+        columns=[
+            "page_id", "box_page_id", "word", "line", "text", "tesseract_text", "tesseract_conf", "similarity", "match",
+            "x", "y", "w", "h", "cont_x", "cont_y", "cont_w", "cont_h",
+        ],
     ).to_parquet(page_dir / "words.parquet", index=False)

@@ -14,19 +14,23 @@ Before that, Tesseract lines are split into cells and paired with chandra lines 
 similarity in any order (align_region), which handles tables: chandra reads them column by
 column, Tesseract row by row.
 
-Matched words carry chandra's text with Tesseract's box. Unmatched chandra tokens are
-attached to the line of their nearest matched neighbour so no text is lost at line level;
-unmatched Tesseract words (often bleed-through noise) are dropped.
+Matched words carry chandra's text with Tesseract's box. Given the region crop, unmatched
+chandra tokens next to matched ones get an estimated box (stages/estimate.py, match
+"estimated"). The rest are attached to the line of their nearest matched neighbour so no text
+is lost at line level; unmatched Tesseract words (often bleed-through noise) are dropped
+unless an estimate reuses them.
 """
 
 import difflib
 import re
 import unicodedata
 from collections import Counter
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
+import cv2
 import numpy as np
 
+from newspaper_pipeline.stages.estimate import Box, Ink, _box, estimate_unmatched, repair_matches
 from newspaper_pipeline.transforms import union_box
 
 MAX_FUZZY_CELLS = 250_000  # cap on the NW matrix for one gap; larger gaps keep exact anchors only
@@ -300,7 +304,9 @@ def _segment_pairs(
     return pairs
 
 
-def align_region(chandra_text: str, words: List[Dict], min_similarity: float = 0.6, noise_conf: float = 20.0) -> Dict:
+def align_region(
+    chandra_text: str, words: List[Dict], min_similarity: float = 0.6, noise_conf: float = 20.0, crop_path: Optional[str] = None
+) -> Dict:
     """
     Combine chandra text and Tesseract words for one region.
 
@@ -314,13 +320,18 @@ def align_region(chandra_text: str, words: List[Dict], min_similarity: float = 0
         words: Tesseract words (text, conf, line, x1..y2 in crop pixels)
         min_similarity: Minimum rapidfuzz ratio (0-1) for a fuzzy match
         noise_conf: Unmatched Tesseract words below this confidence don't extend line boxes
+        crop_path: The region crop Tesseract read; when given, unmatched tokens next to matched
+            ones get estimated boxes
 
     Returns:
         Dict with:
-            words: matched words {text, chandra_index, tesseract_text, conf, line, similarity, match, x1..y2}
+            words: words with a box, in chandra order {text, chandra_index, tesseract_text, conf, line,
+                similarity, match, x1..y2}; match is "exact", "fuzzy" or "estimated" (tesseract_text
+                and conf are set when the estimate reused an unmatched Tesseract box, else "" / None)
             lines: {line, text, x1..y2, n_words} for every line (or table cell) that received chandra text
             score: fraction of chandra tokens with letters or digits placed on a Tesseract word
-            n_chandra_tokens, n_tesseract_words, n_matched
+                (matched only, estimates not counted)
+            n_chandra_tokens, n_tesseract_words, n_matched, n_estimated
     """
     chandra_tokens, c_segments = chandra_segments(chandra_text)
     result: Dict = {
@@ -330,6 +341,7 @@ def align_region(chandra_text: str, words: List[Dict], min_similarity: float = 0
         "n_chandra_tokens": len(chandra_tokens),
         "n_tesseract_words": len(words),
         "n_matched": 0,
+        "n_estimated": 0,
     }
     if not chandra_tokens or not words:
         return result
@@ -348,25 +360,41 @@ def align_region(chandra_text: str, words: List[Dict], min_similarity: float = 0
         pairs.extend((t_rest[a], c_rest[b], similarity) for a, b, similarity in leftover)
     pairs.sort(key=lambda pair: pair[1])
 
+    # With the crop, fix matched boxes that don't cover their word (see estimate.repair_matches)
+    gray = cv2.imread(crop_path, cv2.IMREAD_GRAYSCALE) if crop_path is not None else None
+    ink = Ink(gray) if gray is not None else None
+    parts: Dict[int, List[Box]] = {}
+    split: Dict[int, Tuple[Box, int]] = {}
+    ignore: Set[int] = set()
+    if ink is not None and pairs:
+        repairs = repair_matches(chandra_tokens, c_segments, words, pairs, ink, normalise_token)
+        pairs, parts, split, ignore = repairs.pairs, repairs.parts, repairs.split, repairs.ignore
+
+    def entry(cj: int, box: Box, line: int, match: str, tesseract_text: str, conf: Optional[float], similarity: float) -> Dict:
+        return {
+            "text": chandra_tokens[cj],
+            "chandra_index": cj,
+            "tesseract_text": tesseract_text,
+            "conf": conf,
+            "line": line,
+            "similarity": similarity,
+            "match": match,
+            "x1": box[0],
+            "y1": box[1],
+            "x2": box[2],
+            "y2": box[3],
+        }
+
     token_line: List[int] = [-1] * len(chandra_tokens)
     for ti, cj, similarity in pairs:
         word = words[ti]
         token_line[cj] = segment_of[ti]
+        box = parts[cj][0] if cj in parts else split[cj][0] if cj in split else _box(word)
         result["words"].append(
-            {
-                "text": chandra_tokens[cj],
-                "chandra_index": cj,
-                "tesseract_text": word["text"],
-                "conf": word["conf"],
-                "line": segment_of[ti],
-                "similarity": round(similarity, 3),
-                "match": "exact" if similarity == 1.0 else "fuzzy",
-                "x1": word["x1"],
-                "y1": word["y1"],
-                "x2": word["x2"],
-                "y2": word["y2"],
-            }
+            entry(cj, box, segment_of[ti], "exact" if similarity == 1.0 else "fuzzy", word["text"], word["conf"], round(similarity, 3))
         )
+        if cj in parts:
+            result["words"][-1]["parts"] = parts[cj]  # printed on two lines: head, then tail
     result["n_matched"] = len(pairs)
     # Score over tokens with letters or digits: braces and dot leaders carry no position
     textual = [j for j, t in enumerate(chandra_tokens) if _has_text(t)]
@@ -374,6 +402,23 @@ def align_region(chandra_text: str, words: List[Dict], min_similarity: float = 0
     result["score"] = round(sum(1 for j in textual if j in matched_c) / max(len(textual), 1), 4)
     if not pairs:
         return result
+
+    estimated_boxes: Dict[int, Box] = {}
+    for cj, (box, ti) in split.items():
+        if cj not in matched_c:  # the other words of a fused Tesseract box
+            token_line[cj] = segment_of[ti]
+            estimated_boxes[cj] = box
+            result["words"].append(entry(cj, box, segment_of[ti], "estimated", words[ti]["text"], words[ti]["conf"], 0.0))
+    if ink is not None:
+        for cj, (box, line_word, reused) in estimate_unmatched(chandra_tokens, c_segments, words, pairs, ink, ignore).items():
+            if cj in estimated_boxes or not _has_text(chandra_tokens[cj]):
+                continue  # braces, rules and leaders: the hold-out test only covered real words
+            token_line[cj] = segment_of[line_word]
+            estimated_boxes[cj] = box
+            reused_text, reused_conf = (words[reused]["text"], words[reused]["conf"]) if reused is not None else ("", None)
+            result["words"].append(entry(cj, box, segment_of[line_word], "estimated", reused_text, reused_conf, 0.0))
+    result["words"].sort(key=lambda w: w["chandra_index"])
+    result["n_estimated"] = len(estimated_boxes)
 
     # A line annotation is one chandra line (or table cell) within one Tesseract segment.
     # Unmatched chandra tokens join the line of the previous matched token in the same chandra
@@ -399,9 +444,12 @@ def align_region(chandra_text: str, words: List[Dict], min_similarity: float = 0
     shared_segments = {t for t, _ in matched_by_key if sum(1 for k in matched_by_key if k[0] == t) > 1}
 
     line_tokens: Dict[Tuple[int, int], List[str]] = {}
-    for token, key in zip(chandra_tokens, token_key):
+    estimated_by_key: Dict[Tuple[int, int], List[Tuple[int, int, int, int]]] = {}
+    for j, (token, key) in enumerate(zip(chandra_tokens, token_key)):
         if key is not None:
             line_tokens.setdefault(key, []).append(token)
+            if j in estimated_boxes:
+                estimated_by_key.setdefault(key, []).append(estimated_boxes[j])
     matched_tess = {ti for ti, _, _ in pairs}
     for number, (key, tokens) in enumerate(sorted(line_tokens.items())):
         t_seg, _ = key
@@ -413,7 +461,8 @@ def align_region(chandra_text: str, words: List[Dict], min_similarity: float = 0
             members = [i for i in t_segments[t_seg] if i in matched_tess or words[i]["conf"] >= noise_conf]
         if not members:
             continue
-        x1, y1, x2, y2 = union_box((words[i]["x1"], words[i]["y1"], words[i]["x2"], words[i]["y2"]) for i in members)
+        boxes = [(words[i]["x1"], words[i]["y1"], words[i]["x2"], words[i]["y2"]) for i in members] + estimated_by_key.get(key, [])
+        x1, y1, x2, y2 = union_box(boxes)
         result["lines"].append(
             {"line": number, "text": " ".join(tokens), "x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2), "n_words": len(tokens)}
         )

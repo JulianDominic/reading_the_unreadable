@@ -16,11 +16,17 @@ import json
 import re
 from typing import Optional, Sequence
 
+# Phrases a model uses about the image, never about the world: generic ones like "I cannot" or
+# "appears to be" are everyday Victorian prose ("I cannot conceive...") and withheld real text.
+# Commentary comes first in an answer, so only the start of the output is checked.
 META_COMMENTARY = re.compile(
-    r"\b(?:the|this) image\b|\bis (?:not )?visible\b|\bappears to (?:be|show)\b|\bheavily cropped\b"
-    r"|\bno (?:legible|readable|visible) text\b|\bI (?:cannot|can't|am unable)\b",
+    r"\b(?:the|this) (?:image|picture|photograph|scan)\b|\bheavily cropped\b"
+    r"|\bno (?:legible|readable|visible) text\b"
+    r"|\bI (?:cannot|can't|am unable to) (?:read|transcribe|make out|decipher|see|identify)\b"
+    r"|\b(?:text|image|writing) is (?:not |too )?(?:visible|legible|readable|blurry|faded|unclear)\b",
     re.IGNORECASE,
 )
+COMMENTARY_WINDOW = 300  # characters
 
 
 def is_layout_json(content: str) -> bool:
@@ -35,6 +41,29 @@ def is_layout_json(content: str) -> bool:
     return isinstance(data, list) and bool(data) and all(isinstance(item, dict) and "bbox" in item for item in data)
 
 
+def fragment_share(text: str) -> float:
+    """
+    Share of the tokens with letters that have at most 3 of them. Prose is about 40-50%; the
+    cut-off ends of lines from a neighbouring column or the facing page ("to e, in le een, ed all
+    he") are 85-100%. Numbers don't count either way, so tables and advertisements stay low.
+    """
+    tokens = [t for t in text.split() if any(c.isalpha() for c in t)]
+    if len(tokens) < 3:
+        return 0.0
+    return sum(1 for t in tokens if sum(c.isalpha() for c in t) <= 3) / len(tokens)
+
+
+def transcription_problem(region_class: str, text: str, raw: str, finish_reasons: Sequence[str] = ()) -> Optional[str]:
+    """The checks that need nothing but chandra's output: worth a retry when they fail."""
+    if is_layout_json(raw):
+        return "layout JSON instead of text"
+    if any(reason == "length" for reason in finish_reasons):
+        return "output hit its token limit (repetition loop)"
+    if region_class != "figure" and text.strip() and META_COMMENTARY.search(text[:COMMENTARY_WINDOW]):
+        return "model commentary instead of a transcription"
+    return None
+
+
 def assess_region(
     region_class: str,
     text: str,
@@ -46,6 +75,7 @@ def assess_region(
     n_tesseract_words: int,
     alignment_score: float,
     finish_reasons: Sequence[str] = (),
+    at_page_edge: bool = False,
 ) -> Optional[str]:
     """
     Decide whether a region's chandra output looks like something other than a transcription.
@@ -58,18 +88,19 @@ def assess_region(
         word_area: Typical Tesseract word box area on this page (pixels), used to estimate capacity
         n_chandra_tokens, n_tesseract_words, alignment_score: From the alignment stage
         finish_reasons: Per-request finish reasons; "length" means the output hit its token cap
+        at_page_edge: The region touches the left or right edge of the scan
 
     Returns:
         Reason string when suspect, otherwise None
     """
-    if is_layout_json(raw):
-        return "layout JSON instead of text"
-    if any(reason == "length" for reason in finish_reasons):
-        return "output hit its token limit (repetition loop)"
-    if region_class == "figure" or not text.strip():
-        return None
-    if META_COMMENTARY.search(text):
-        return "model commentary instead of a transcription"
+    problem = transcription_problem(region_class, text, raw, finish_reasons)
+    if problem or region_class == "figure" or not text.strip():
+        return problem
+    # A strip of cut-off text is a few letters wide. Calibrated on the edge regions of 250 BLN600
+    # excerpts and 9 full pages: under 6 word sizes wide and 60% fragments caught 35 of 53 strips
+    # and none of 893 real regions (real text at an edge is at least 2.9 word sizes wide)
+    if at_page_edge and width < 6.0 * max(word_area, 1.0) ** 0.5 and fragment_share(text) >= 0.6:
+        return "cut-off text at the page edge"
     capacity = (width * height) / max(word_area, 1.0)
     if n_chandra_tokens > max(20.0, 3.0 * capacity):
         return f"{n_chandra_tokens} tokens but the region holds about {capacity:.0f} words"

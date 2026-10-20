@@ -158,6 +158,7 @@ class _Job:
     cache_key: str = field(compare=False)
     future: asyncio.Future = field(compare=False)
     max_tokens: int = field(compare=False, default=8192)
+    temperature: float = field(compare=False, default=0.0)
 
 
 class ChandraPool:
@@ -204,20 +205,23 @@ class ChandraPool:
     def pending(self) -> int:
         return self.queue.qsize()
 
-    def _cache_key(self, image_png: bytes, prompt: str, max_tokens: int) -> str:
+    def _cache_key(self, image_png: bytes, prompt: str, max_tokens: int, temperature: float) -> str:
         digest = hashlib.sha256()
-        digest.update(f"{self.config.chandra_model}|{max_tokens}|{self.config.chandra_temperature}|{prompt}|".encode())
+        digest.update(f"{self.config.chandra_model}|{max_tokens}|{temperature}|{prompt}|".encode())
         digest.update(image_png)
         return digest.hexdigest()
 
     def _cache_path(self, key: str) -> Path:
         return self.cache_dir / key[:2] / f"{key}.json"
 
-    def submit(self, image_png: bytes, prompt: str, priority: Tuple, max_tokens: Optional[int] = None) -> "asyncio.Future[Dict]":
+    def submit(
+        self, image_png: bytes, prompt: str, priority: Tuple, max_tokens: Optional[int] = None, temperature: Optional[float] = None
+    ) -> "asyncio.Future[Dict]":
         """Queue one image; resolves to {content, finish_reason, prompt_tokens, completion_tokens, cached}."""
         future: asyncio.Future = asyncio.get_running_loop().create_future()
         max_tokens = max_tokens or self.config.chandra_max_tokens
-        key = self._cache_key(image_png, prompt, max_tokens)
+        temperature = self.config.chandra_temperature if temperature is None else temperature
+        key = self._cache_key(image_png, prompt, max_tokens, temperature)
         cache_path = self._cache_path(key)
         if cache_path.exists():
             try:
@@ -228,7 +232,7 @@ class ChandraPool:
                 return future
             except (OSError, json.JSONDecodeError):
                 logger.warning(f"Ignoring unreadable cache entry {cache_path}")
-        self.queue.put_nowait(_Job(priority, next(self._seq), image_png, prompt, key, future, max_tokens))
+        self.queue.put_nowait(_Job(priority, next(self._seq), image_png, prompt, key, future, max_tokens, temperature))
         return future
 
     async def _worker(self, index: int) -> None:
@@ -237,7 +241,7 @@ class ChandraPool:
             try:
                 if job.future.cancelled():
                     continue
-                result = await self._request(job.image_png, job.prompt, job.max_tokens)
+                result = await self._request(job.image_png, job.prompt, job.max_tokens, job.temperature)
                 path = self._cache_path(job.cache_key)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 tmp = path.with_suffix(".tmp")
@@ -257,7 +261,7 @@ class ChandraPool:
             finally:
                 self.queue.task_done()
 
-    async def _request(self, image_png: bytes, prompt: str, max_tokens: int) -> Dict:
+    async def _request(self, image_png: bytes, prompt: str, max_tokens: int, temperature: float) -> Dict:
         from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
         from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
@@ -278,7 +282,7 @@ class ChandraPool:
                 response = await self.client.chat.completions.create(
                     model=self.config.chandra_model,
                     max_tokens=max_tokens,
-                    temperature=self.config.chandra_temperature,
+                    temperature=temperature,
                     messages=[
                         {
                             "role": "user",
@@ -316,7 +320,7 @@ class ChandraPool:
         words = (width * height) / self.config.chandra_min_word_area
         return int(min(self.config.chandra_max_tokens, max(256, self.config.chandra_tokens_per_word * words)))
 
-    async def ocr_region(self, crop_path: str, region_class: str, priority: Tuple) -> Dict:
+    async def ocr_region(self, crop_path: str, region_class: str, priority: Tuple, attempt: int = 0) -> Dict:
         """
         Transcribe one region, splitting tall crops into overlapping segments.
 
@@ -324,6 +328,9 @@ class ChandraPool:
             crop_path: Region crop on disk
             region_class: Layout class (text, title, figure, table); selects the prompt
             priority: Queue priority, lower runs first
+            attempt: 0 for the first try. A retry (after output that wasn't a transcription) uses
+                segments half as tall per attempt and a little sampling temperature, which breaks
+                the repetition loops greedy decoding can fall into
 
         Returns:
             Dict with text, html, labels, image_descriptions, finish_reasons, prompt/completion tokens,
@@ -339,7 +346,7 @@ class ChandraPool:
             if region_class == "figure":
                 offsets = [(0, height)]
             else:
-                offsets = split_offsets(height, width, self.config.split_max_ratio, self.config.split_overlap_fraction)
+                offsets = split_offsets(height, width, self.config.split_max_ratio / 2**attempt, self.config.split_overlap_fraction)
             segments, caps = [], []
             for y1, y2 in offsets:
                 caps.append(self.token_cap(region_class, width, y2 - y1))
@@ -347,7 +354,8 @@ class ChandraPool:
                 pad_to_aspect(image.crop((0, y1, width, y2)), self.config.max_aspect_ratio).save(buffer, format="PNG")
                 segments.append(buffer.getvalue())
 
-        futures = [self.submit(png, prompt, (*priority, i), cap) for i, (png, cap) in enumerate(zip(segments, caps))]
+        temperature = self.config.chandra_retry_temperature if attempt else None
+        futures = [self.submit(png, prompt, (*priority, i), cap, temperature) for i, (png, cap) in enumerate(zip(segments, caps))]
         results = await asyncio.gather(*futures)
 
         drop = () if region_class == "figure" else IMAGE_LABELS

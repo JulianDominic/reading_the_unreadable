@@ -72,6 +72,8 @@ class PipelineConfig:
     chandra_tokens_per_word: float = 6.0
     chandra_min_word_area: float = 2000.0  # pixels; smaller than a typical word box, so the cap is generous
     chandra_retries: int = 4
+    chandra_quality_retries: int = 2  # re-ask when the output isn't a transcription (loop, commentary, layout JSON)
+    chandra_retry_temperature: float = 0.3
     chandra_retry_min_wait: float = 4.0
     chandra_retry_max_wait: float = 60.0
     prompts: Dict[str, str] = field(default_factory=lambda: dict(DEFAULT_PROMPTS))

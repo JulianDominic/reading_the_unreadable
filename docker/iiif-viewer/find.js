@@ -40,18 +40,26 @@ const NewspaperFind = (() => {
     return matchCase ? folded : folded.toLowerCase();
   }
 
+  // A word's box(es) on its canvas: "canvas#xywh=..." or a SpecificResource whose SVG selector has
+  // one rectangle per part (words hyphenated across lines), with an xywh fragment as fallback.
   function parseTarget(target) {
-    let source = target;
-    let fragment = "";
-    if (target && typeof target === "object") {
-      source = target.source && (target.source.id || target.source);
-      fragment = (target.selector && target.selector.value) || "";
+    if (typeof target === "string") {
+      const match = target.match(/^([^#]*)#xywh=(?:pixel:)?(\d+),(\d+),(\d+),(\d+)/);
+      if (!match) return null;
+      const [x, y, w, h] = match.slice(2).map(Number);
+      return { canvasId: match[1], x, y, w, h, extra: [] };
     }
+    const source = target && target.source && (target.source.id || target.source);
     if (typeof source !== "string") return null;
-    const match = `${source}${fragment ? `#${fragment}` : ""}`.match(/^([^#]*)#xywh=(?:pixel:)?(\d+),(\d+),(\d+),(\d+)/);
-    if (!match) return null;
-    const [x, y, w, h] = match.slice(2).map(Number);
-    return { canvasId: match[1], x, y, w, h };
+    const selectors = [].concat(target.selector || []);
+    const svg = selectors.find((s) => s.type === "SvgSelector");
+    if (svg) {
+      const rects = [...svg.value.matchAll(/M(-?[\d.]+),(-?[\d.]+) h(-?[\d.]+) v(-?[\d.]+)/g)]
+        .map((m) => ({ x: Number(m[1]), y: Number(m[2]), w: Number(m[3]), h: Number(m[4]) }));
+      if (rects.length) return { canvasId: source, ...rects[0], extra: rects.slice(1) };
+    }
+    const fragment = selectors.find((s) => s.type === "FragmentSelector");
+    return fragment ? parseTarget(`${source}#${fragment.value}`) : null;
   }
 
   function bodyText(body) {
@@ -158,7 +166,7 @@ const NewspaperFind = (() => {
       const last = firstAbove(starts, end - 1) - 1;
       const words = index.words.slice(first, last + 1);
       if (words.length === 0) continue;
-      const boxes = lineBoxes(words);
+      const boxes = lineBoxes(words.flatMap((word) => [word, ...word.extra]));
       const heights = words.map((w) => w.h).sort((a, b) => a - b);
       hits.push({
         canvasId: index.canvasId,

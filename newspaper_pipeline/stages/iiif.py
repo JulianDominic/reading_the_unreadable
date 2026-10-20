@@ -19,7 +19,7 @@ import json
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Union
 from urllib.parse import quote
 
 PRESENTATION_CONTEXT = "http://iiif.io/api/presentation/3/context.json"
@@ -41,7 +41,10 @@ def image_identifier(source_relpath: str, slash_substitute: Optional[str] = None
     return quote(path, safe="")
 
 
-def _text_annotation(annotation_id: str, target: str, text: str, granularity: str, language: str, extra_bodies: Iterable[Dict] = ()) -> Dict:
+ESTIMATED_TAG = {"type": "TextualBody", "value": "estimated position", "purpose": "tagging"}
+
+
+def _text_annotation(annotation_id: str, target: Union[str, Dict], text: str, granularity: str, language: str, extra_bodies: Iterable[Dict] = ()) -> Dict:
     body = {"type": "TextualBody", "value": text, "format": "text/plain", "language": language}
     bodies = [body, *extra_bodies]
     return {
@@ -51,6 +54,23 @@ def _text_annotation(annotation_id: str, target: str, text: str, granularity: st
         "textGranularity": granularity,
         "body": bodies if len(bodies) > 1 else body,
         "target": target,
+    }
+
+
+def _parts_target(canvas_id: str, boxes: List[Dict]) -> Dict:
+    """
+    Target for a word printed in parts (hyphenated across lines): an SVG selector with one
+    rectangle per part, plus the first part as an xywh fragment for viewers without SVG.
+    """
+    path = " ".join(f"M{b['x']},{b['y']} h{b['w']} v{b['h']} h{-b['w']} Z" for b in boxes)
+    first = boxes[0]
+    return {
+        "type": "SpecificResource",
+        "source": {"id": canvas_id, "type": "Canvas"},
+        "selector": [
+            {"type": "FragmentSelector", "conformsTo": "http://www.w3.org/TR/media-frags/", "value": f"xywh={first['x']},{first['y']},{first['w']},{first['h']}"},
+            {"type": "SvgSelector", "value": f'<svg xmlns="http://www.w3.org/2000/svg"><path d="{path}" fill="none" stroke="#00BFFF"/></svg>'},
+        ],
     }
 
 
@@ -92,7 +112,10 @@ def build_page_documents(page: Dict, regions: List[Dict], config) -> Dict[str, D
         for n, line in enumerate(region.get("lines", [])):
             lines.append(_text_annotation(f"{page_base}/annotation/line/{rid}-{n}", _xywh(canvas_id, line["box"]), line["text"], "line", language))
         for n, word in enumerate(region.get("words", [])):
-            words.append(_text_annotation(f"{page_base}/annotation/word/{rid}-{n}", _xywh(canvas_id, word["box"]), word["text"], "word", language))
+            # Estimated boxes are tagged so viewers and users can tell them from measured ones
+            tags = [ESTIMATED_TAG] if word.get("match") == "estimated" else []
+            target = _parts_target(canvas_id, word["part_boxes"]) if word.get("part_boxes") else _xywh(canvas_id, word["box"])
+            words.append(_text_annotation(f"{page_base}/annotation/word/{rid}-{n}", target, word["text"], "word", language, tags))
 
     annotation_files = {"blocks": blocks, "lines": lines, "words": words}
     documents: Dict[str, Dict] = {}

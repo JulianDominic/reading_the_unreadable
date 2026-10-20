@@ -40,7 +40,7 @@ from newspaper_pipeline.stages.export import write_flat_exports, write_overlay
 from newspaper_pipeline.stages.ocr_chandra import ChandraPool
 from newspaper_pipeline.stages.ocr_tesseract import init_worker, tesseract_words
 from newspaper_pipeline.stages.preprocess import preprocess_page
-from newspaper_pipeline.stages.quality import assess_region
+from newspaper_pipeline.stages.quality import assess_region, transcription_problem
 from newspaper_pipeline.transforms import PageTransform
 
 logger = logging.getLogger(__name__)
@@ -67,11 +67,12 @@ class RunSummary:
     chandra: Dict[str, int] = field(default_factory=dict)
 
 
-def _token_share(regions: Iterable[Dict]) -> float:
-    """Matched chandra tokens / all chandra tokens over the given regions."""
+def _token_share(regions: Iterable[Dict], with_estimated: bool = False) -> float:
+    """Matched (and optionally estimated) chandra tokens / all chandra tokens over the given regions."""
     regions = list(regions)
     total = sum(r.get("n_chandra_tokens", 0) for r in regions)
-    return round(sum(r.get("n_matched", 0) for r in regions) / total, 4) if total else 0.0
+    placed = sum(r.get("n_matched", 0) + (r.get("n_estimated", 0) if with_estimated else 0) for r in regions)
+    return round(placed / total, 4) if total else 0.0
 
 
 def make_page_id(relpath: Path) -> str:
@@ -131,7 +132,8 @@ class Pipeline:
     async def _process_region(self, page: SourcePage, region: Dict) -> Dict:
         loop = asyncio.get_running_loop()
         region_class = region["class"]
-        chandra_task = asyncio.create_task(self.chandra.ocr_region(region["crop_path"], region_class, (page.seq, int(region["reading_order"]))))
+        priority = (page.seq, int(region["reading_order"]))
+        chandra_task = asyncio.create_task(self.chandra.ocr_region(region["crop_path"], region_class, priority))
 
         words: List[Dict] = []
         tesseract_error = ""
@@ -151,9 +153,21 @@ class Pipeline:
             result["chandra_failed"] = True
             return result
 
+        # Output that isn't a transcription would be withheld and its text lost: ask again first
+        for attempt in range(1, self.config.chandra_quality_retries + 1):
+            problem = transcription_problem(region_class, chandra["text"], chandra["html"], chandra["finish_reasons"])
+            if problem is None:
+                break
+            logger.info(f"{page.page_id} {region['box_page_id']}: {problem}; asking chandra again (retry {attempt})")
+            try:
+                chandra = await self.chandra.ocr_region(region["crop_path"], region_class, priority, attempt)
+            except Exception as exc:
+                logger.warning(f"{page.page_id} {region['box_page_id']}: chandra retry failed: {exc!r}")
+                break
+
         result.update(chandra, n_chandra_tokens=len(chandra["text"].split()), n_tesseract_words=len(words))
         if region_class != "figure" and words:
-            alignment = await asyncio.to_thread(align_region, chandra["text"], words)
+            alignment = await asyncio.to_thread(align_region, chandra["text"], words, crop_path=region["crop_path"])
             result.update(
                 words=alignment["words"],
                 lines=alignment["lines"],
@@ -161,6 +175,7 @@ class Pipeline:
                 n_chandra_tokens=alignment["n_chandra_tokens"],
                 n_tesseract_words=alignment["n_tesseract_words"],
                 n_matched=alignment["n_matched"],
+                n_estimated=alignment["n_estimated"],
             )
         return result
 
@@ -190,7 +205,15 @@ class Pipeline:
                 "box": box(region),
                 **{k: v for k, v in result.items() if k not in ("words", "lines")},
                 "lines": [{**line, "box": box(line, offset)} for line in result.get("lines", [])],
-                "words": [{**word, "box": box(word, offset)} for word in result.get("words", [])],
+                "words": [
+                    {
+                        **word,
+                        "box": box(word, offset),
+                        # a word printed on two lines (hyphenated): both parts, head first
+                        **({"part_boxes": [box(dict(zip(("x1", "y1", "x2", "y2"), part)), offset) for part in word["parts"]]} if word.get("parts") else {}),
+                    }
+                    for word in result.get("words", [])
+                ],
             }
             if result.get("error"):
                 errors.append(f"{region['box_page_id']}: {result['error']}")
@@ -205,6 +228,9 @@ class Pipeline:
                 result.get("n_tesseract_words", 0),
                 result.get("alignment_score", 0.0),
                 result.get("finish_reasons", []),
+                # touching the left or right edge of the scan (original-scan coordinates: deskewing
+                # shifts a strip at x=0 several pixels inwards)
+                at_page_edge=entry["box"]["x"] <= 0.02 * converted["width"] or entry["box"]["x"] + entry["box"]["w"] >= 0.98 * converted["width"],
             )
             if reason:
                 # Keep the raw output for review in regions.parquet, but publish nothing from it
@@ -242,8 +268,9 @@ class Pipeline:
             "lines": sum(len(r["lines"]) for r in page_regions),
             # share of chandra tokens placed on a Tesseract box, in regions where Tesseract found words
             "alignment_score": _token_share(r for r in published if r.get("n_tesseract_words")),
-            # share of all published chandra text that has word boxes
-            "word_box_coverage": _token_share(published),
+            # share of all published chandra text that has word boxes, matched or estimated
+            "word_box_coverage": _token_share(published, with_estimated=True),
+            "estimated_words": sum(r.get("n_estimated", 0) for r in published),
             "chandra_cached_regions": sum(1 for r in page_regions if r.get("cached")),
             "suspect_regions": suspects,
             "timings_seconds": timings,
