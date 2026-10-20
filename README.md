@@ -61,6 +61,11 @@ docker compose down
 
 - The viewer shows word boxes by default. Add `?layers=blocks,lines,words` for every layer or
   `?manifest=<page_id>` for a single page.
+- Ctrl+F / ⌘F searches the open page's OCR text as you type. Every match is highlighted and
+  the view jumps to the current one, which is also selected in the annotation sidebar (its
+  line or block if words are hidden). Enter / Shift+Enter step through matches, Esc closes the
+  bar. Matching ignores case and accents (toggles for match case and whole words), works on
+  phrases, and joins words hyphenated at a line end.
 - `compose.yaml` mounts `./input_images` and `./output/iiif`; edit those paths if your files
   are elsewhere.
 - On your own servers, point Cantaloupe at the scan folder and serve the output folder with

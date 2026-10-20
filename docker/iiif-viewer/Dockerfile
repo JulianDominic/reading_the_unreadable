@@ -1,10 +1,12 @@
 # One image that serves the pipeline output for viewing:
 #   :8182  Cantaloupe, the IIIF Image API server for the original scans (mounted at /images)
 #   :8000  nginx, serving the manifests (mounted at /srv/iiif) and a Mirador viewer at /viewer.html
+#          (Ctrl+F searches the page text, see find.js)
 FROM eclipse-temurin:25-jre-noble
 
 ARG CANTALOUPE_VERSION=5.0.7
 ARG CANTALOUPE_SHA256=741ddee3f5284b179cd2555dc545a8afcb02534f03896cfa9235249fd66b0665
+# mirador-fixes.js patches performance bugs in this version; recheck it when upgrading
 ARG MIRADOR_VERSION=4.3.0
 ARG MIRADOR_SHA256=38e6aefcf445ce7348838a954f5b76220b5ef03e6772a5998f77c32e541ddd84
 
@@ -42,7 +44,7 @@ RUN cd /opt/cantaloupe && cp cantaloupe.properties.sample cantaloupe.properties 
     && test "$(grep -cE '^(FilesystemSource.BasicLookupStrategy.path_prefix = /images/|processor.selection_strategy = ManualSelectionStrategy|processor.ManualSelectionStrategy.jp2 = OpenJpegProcessor|OpenJpegProcessor.path_to_binaries = /usr/bin|cache.server.derivative.enabled = true|cache.server.derivative = FilesystemCache|log.application.level = info)$' cantaloupe.properties)" = 7
 
 COPY nginx.conf /etc/nginx/conf.d/iiif.conf
-COPY viewer.html /srv/viewer/viewer.html
+COPY viewer.html mirador-fixes.js find.js /srv/viewer/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

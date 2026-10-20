@@ -1,12 +1,35 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><title>Newspaper IIIF viewer</title>
 <script src="/mirador.min.js"></script>
-<style>body{margin:0}#viewer{position:absolute;inset:0}</style></head>
+<script src="/mirador-fixes.js"></script>
+<script src="/find.js"></script>
+<style>
+body{margin:0}#viewer{position:absolute;inset:0}
+/* Find bar (Ctrl+F / Cmd+F), see find.js */
+.find-bar{position:fixed;top:64px;right:24px;z-index:2000;display:flex;align-items:center;gap:2px;
+  padding:4px 4px 4px 8px;background:#fff;border-radius:6px;box-shadow:0 2px 10px rgba(0,0,0,.3);
+  font:14px Roboto,Helvetica,Arial,sans-serif;color:#222}
+.find-bar[hidden]{display:none}
+.find-bar input{width:220px;border:0;outline:0;padding:6px 4px;font:inherit;background:transparent}
+.find-bar input::-webkit-search-cancel-button{display:none}
+.find-bar.find-none input{color:#c62828}
+.find-count{min-width:72px;padding:0 6px;color:#666;font-size:12px;text-align:right;white-space:nowrap}
+.find-bar.find-none .find-count{color:#c62828}
+.find-bar button{min-width:30px;height:30px;border:0;border-radius:4px;background:transparent;color:#444;
+  font:inherit;line-height:1;cursor:pointer}
+.find-bar button:hover{background:#eee}
+.find-toggle{font-size:12px!important}
+.find-toggle[aria-pressed="true"]{background:#d7e3fc!important;color:#0d47a1}
+.find-divider{width:1px;height:20px;margin:0 4px;background:#ddd}
+/* Canvas the highlights are drawn on, over the page image */
+.find-layer{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;mix-blend-mode:multiply}
+</style></head>
 <body><div id="viewer"></div>
 <script>
 // URL parameters:
 //   ?manifest=<page_id> or a full manifest URL. Default: every page in /collection.json, first one opened.
 //   ?layers=words (default), lines,words or blocks,lines,words
+// Ctrl+F / Cmd+F searches the text of the open page (find.js).
 const params = new URLSearchParams(location.search);
 const layers = (params.get("layers") || "words").split(",");
 
@@ -25,6 +48,12 @@ function keepLayers(url, action) {
   return { ...action, manifestJson };
 }
 
+// Find needs the words of every page, whichever layers are shown
+function recordForFind(url, action) {
+  NewspaperFind.recordManifest(action);
+  return action;
+}
+
 function manifestUrl(value) {
   return /^https?:\/\//.test(value) ? value : new URL(`/${value}/manifest.json`, location.origin).href;
 }
@@ -38,12 +67,13 @@ async function manifests() {
 }
 
 manifests().then((ids) => {
-  Mirador.viewer({
+  const mirador = Mirador.viewer({
     id: "viewer",
-    requests: { postprocessors: [keepLayers] },
+    requests: { postprocessors: [recordForFind, keepLayers] },
     window: { sideBarOpenByDefault: true, defaultSideBarPanel: "annotations" },
     catalog: ids.map((manifestId) => ({ manifestId })),
     windows: ids.slice(0, 1).map((manifestId) => ({ manifestId })),
   });
+  NewspaperFind.attach(mirador.store);
 });
 </script></body></html>
